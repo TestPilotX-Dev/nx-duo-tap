@@ -23,6 +23,7 @@ belongs there and where to fetch it.
   SysDVR-UVC-Capture GPL-2.0  https://github.com/Insektaure/SysDVR-UVC-Capture
   libdrm (tegra)    MIT       https://gitlab.freedesktop.org/mesa/drm
   libnx             ISC       https://github.com/switchbrew/libnx
+  libtesla          GPL-2.0   https://github.com/WerWolv/libtesla
   switchbrew wiki             https://switchbrew.org/wiki/
 
 
@@ -67,3 +68,9 @@ maintained by TestPilotX since 2026-11-11 for NX Duo (NX Paradox).
 Modifications Copyright (C) 2026 TestPilotX, under the same GPL-2.0 terms.
 Every change to the original files is recorded, with its date, in the git
 history of https://github.com/TestPilotX-Dev/nx-duo-tap.
+
+2026-11-12, 0.7.22-duo3: the Switch app and the overlay say when the firmware
+is newer than the build knows; the sysmodule's line for it ends with its
+version, and last.txt then reads main:refused_firmware; the firmware window it
+streams on is one header (tier4/applet-mitm/source/nxduo_live_window.h),
+checked against the Atmosphere it is built with by tools/make_release.sh.

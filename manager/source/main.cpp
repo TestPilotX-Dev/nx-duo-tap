@@ -31,7 +31,9 @@
 #include <vector>
 #include <functional>
 #include "../../common/sound_patch.hpp"
+#include "../../common/nxduo_refusal.h"           /* NX Paradox: the sysmodule's firmware refusal, in its log */
 #include "../../tier4/applet-mitm/source/shot_buttons.hpp"
+#include "../../tier4/applet-mitm/source/nxduo_live_window.h"   /* NX Paradox: the firmware window it streams on */
 #ifdef SFT_PREVIEW
 #include "preview_extras.hpp"   /* tools/manager-preview: the PC preview's stand-ins */
 #else
@@ -41,7 +43,7 @@
 
 namespace {
 
-    constexpr const char *AppVersion  = "0.7.22-duo2";
+    constexpr const char *AppVersion  = "0.7.22-duo3";
     constexpr u64 ModuleTid           = 0x0100000000000C20ull;
     constexpr const char *ModuleDir   = "sdmc:/atmosphere/contents/0100000000000C20";
     constexpr const char *ModuleNsp   = "sdmc:/atmosphere/contents/0100000000000C20/exefs.nsp";
@@ -432,6 +434,11 @@ namespace {
         bool sound_changed = false;                          /* toggled since this app started: a restart applies it */
         u32 fw = 0;
         u64 ams = 0;
+        /* NX Paradox: the firmware the sysmodule did not start on, being newer than
+         * its build knows (its log, this version's line; 0: not that), and whether
+         * the console is in Spanish (for that notice only) */
+        u32 refused_fw = 0;
+        bool es = false;
         std::string free_mem, others;                        /* v0.7.13: launcher.txt */
         std::string toast;
         u32 toast_frames = 0;
@@ -454,6 +461,15 @@ namespace {
             sound = sftsound::Get();
             running = ModuleRunning();
             have_status = running && SftapStatus(&st);
+            /* NX Paradox: only where "Starting soon" would show - low memory is told first, as before.
+             * Read only with the module not running (pm lists its process before it runs any code,
+             * so its start does not rewrite the log under this read), and the line counts only for
+             * the firmware running now: until the launcher starts it this boot, the log is an
+             * earlier boot's */
+            unsigned v[3] = {};
+            refused_fw = installed && !running && boot && !LowMemoryBoot() && nxduo_refusal_find(AppVersion, v)
+                         && MAKEHOSVERSION(v[0], v[1], v[2]) == MAKEHOSVERSION(HOSVER_MAJOR(fw), HOSVER_MINOR(fw), HOSVER_MICRO(fw))
+                       ? MAKEHOSVERSION(v[0], v[1], v[2]) : 0;
         }
 
         /* v0.7.13: the launcher's view of this boot - the memory sysmodules
@@ -537,6 +553,7 @@ namespace {
             if (!installed) { return "Not installed"; }
             if (!running) {
                 if (!boot) { return "Off at boot"; }
+                if (refused_fw != 0) { return es ? "Todavía no es compatible con este firmware" : "Not compatible with this firmware yet"; }
                 return LowMemoryBoot() ? "Not started" : "Starting soon";
             }
             if (!have_status) { return "Running"; }
@@ -558,6 +575,15 @@ namespace {
             if (!installed) { return "Copy the Switch Frame Tap zip to the SD card and restart the console."; }
             if (!running) {
                 if (!boot) { return "Turn on \"Start with the console\" below, then restart."; }
+                if (refused_fw != 0) {
+                    char n[256];
+                    std::snprintf(n, sizeof(n), es ? "El firmware %u.%u.%u es más nuevo que el que conoce esta versión de NX Duo Tap. "
+                                                     "Tu consola funciona normal; actualiza NX Duo Tap cuando salga una versión nueva."
+                                                   : "Firmware %u.%u.%u is newer than this NX Duo Tap knows. "
+                                                     "Your console works normally; update NX Duo Tap when a new version is out.",
+                                  HOSVER_MAJOR(refused_fw), HOSVER_MINOR(refused_fw), HOSVER_MICRO(refused_fw));
+                    return n;
+                }
                 return LowMemoryBoot() ? "Other sysmodules use the memory it needs - see Setup."
                                        : "It starts about 30 seconds after boot, once the HOME menu is up.";
             }
@@ -634,7 +660,9 @@ namespace {
             std::snprintf(b, sizeof(b), "%u.%u.%u%s", HOSVER_MAJOR(fw), HOSVER_MINOR(fw), HOSVER_MICRO(fw), FwTested() ? "" : " - untested");
             return b;
         }
-        bool FwTested() { return HOSVER_MAJOR(fw) >= 21 && HOSVER_MAJOR(fw) <= 23; }
+        /* NX Paradox: in the window, and not refused by the module as newer than its build
+         * knows (built against Atmosphere 1.12.2, 23.6.0 is refused though 23 is in the window) */
+        bool FwTested() { return refused_fw == 0 && HOSVER_MAJOR(fw) >= NXDUO_LIVE_MAJOR_MIN && HOSVER_MAJOR(fw) <= NXDUO_LIVE_MAJOR_MAX; }
         std::string AmsText() {
             if (ams == 0) { return "Unknown"; }
             char b[48];
@@ -932,8 +960,8 @@ namespace {
                     "Turning off a sysmodule you do not use frees some." +
                     (others.empty() ? std::string() : std::string(" Sysmodules running at boot, biggest first:\n") + others)));
                 p.rows.push_back(Info("Firmware", [this] { return FwText(); }, [this] { return FwTested() ? ui::Dim : ui::Warn; },
-                    "This version was tested on firmware 21.x to 23.x. On other firmware the sysmodule does not "
-                    "stream unless \"Allow untested firmware\" is on."));
+                    "This version was tested on firmware " NXDUO_LIVE_STR(NXDUO_LIVE_MAJOR_MIN) ".x to " NXDUO_LIVE_STR(NXDUO_LIVE_MAJOR_MAX)
+                    ".x. On other firmware the sysmodule does not stream unless \"Allow untested firmware\" is on."));
                 p.rows.push_back(Info("Atmosphere", [this] { return AmsText(); }, nullptr, "The custom firmware this runs on."));
                 p.rows.push_back(Info("Install type", [this] { return std::string(test_install ? "Test (applet-mitm.armed)" : "Release"); },
                     [this] { return test_install ? ui::Warn : ui::Dim; },
@@ -944,7 +972,8 @@ namespace {
                     "Seconds after boot before the sysmodule starts looking for a game. Applies from the next boot."));
                 p.rows.push_back(Toggle("Allow untested firmware", [this] { return set.any_fw; }, [this](int) { set.any_fw = !set.any_fw; Saved(); },
                     "Stream on firmware this version was not tested on. It may work; it may also freeze the console, "
-                    "which needs a hard power-off. Applies from the next boot.", nullptr, nullptr));
+                    "which needs a hard power-off. It also skips the start protection on a firmware this version doesn't know. "
+                    "Applies from the next boot.", nullptr, nullptr));
                 pages.push_back(std::move(p));
             }
 
@@ -1060,11 +1089,18 @@ namespace {
     std::vector<Hit> g_hits;
     void AddHit(int x, int y, int w, int h, HitKind k, int i) { g_hits.push_back({ { x, y, w, h }, k, i }); }
 
+    /* the status card, taller by the lines its detail wraps onto - NX Paradox:
+     * the firmware notice is the one detail longer than a line */
+    int HeroH(App &a) {
+        if (a.refused_fw == 0) { return 168; }
+        return 168 + std::max(0, ui::TextH(a.StateDetail(), ui::Body, CW - 56) - ui::TextH("A", ui::Body, CW - 56));
+    }
+
     int RowHeight(App &a, const Page &p, int i) {
         const Row &r = p.rows[i];
         switch (r.kind) {
             case Kind::Section: return 46;
-            case Kind::Hero:    return 168 + Gap;
+            case Kind::Hero:    return HeroH(a) + Gap;
             case Kind::Tiles:   return 88 + Gap;
             default: break;
         }
@@ -1074,12 +1110,15 @@ namespace {
     }
 
     void DrawHero(App &a, int x, int y, int w) {
-        const int h = 168;
+        const int h = HeroH(a);
         ui::RRect(x, y, w, h, 20, ui::Surf);
         const SDL_Color c = a.StreamColor();
         ui::Disc(x + 40, y + 54, 16, ui::Alpha(c, 46));
         ui::Disc(x + 40, y + 54, 8, c);
-        ui::Text(a.StateTitle(), x + 70, y + 30, ui::Big, ui::Ink);
+        /* NX Paradox: a state too long for the card (the firmware notice in Spanish) a size smaller */
+        const std::string title = a.StateTitle();
+        const bool big = ui::TextW(title, ui::Big) <= w - 98;
+        ui::Text(title, x + 70, big ? y + 30 : y + 35, big ? ui::Big : ui::Title, ui::Ink);
         const bool streaming = a.have_status && a.st.state == 4;
         ui::Text(a.StateDetail(), x + 28, y + 88, ui::Body, ui::Dim, 0, w - 56 - (streaming ? 170 : 0));
         int cx = x + 28;
@@ -1166,10 +1205,14 @@ namespace {
             ui::Text(a.pages[i].name, 36, y + 12, ui::Label, cur ? ui::Ink : ui::Dim);
             AddHit(14, y, SideW - 28, NavH, HitKind::Nav, i);
         }
-        /* the stream, at a glance */
+        /* the stream, at a glance - NX Paradox: a state too long for the sidebar
+         * (the firmware notice) wraps, upwards from the same last line */
         const SDL_Color c = a.StreamColor();
-        ui::Disc(36, ui::H - 38, 6, c);
-        ui::Text(a.StateTitle(), 52, ui::H - 50, ui::Small, ui::Dim);
+        const std::string state = a.StateTitle();
+        const int wrap = ui::TextW(state, ui::Small) > SideW - 60 ? SideW - 60 : 0;
+        const int up = wrap > 0 ? std::max(0, ui::TextH(state, ui::Small, wrap) - ui::TextH("A", ui::Small, wrap)) : 0;
+        ui::Disc(36, ui::H - 38 - up, 6, c);
+        ui::Text(state, 52, ui::H - 50 - up, ui::Small, ui::Dim, 0, wrap);
     }
 
     /* button hints, right to left: glyph, the letter the PC preview draws, label */
@@ -1609,6 +1652,7 @@ int main(int, char **) {
     App app;
     app.fw = hosversionGet();
     if (R_FAILED(splGetConfig(static_cast<SplConfigItem>(65000), &app.ams))) { app.ams = 0; }
+    app.es = nxduo_system_spanish() != 0;   /* NX Paradox: the "set" service, opened and closed in there */
     app.Refresh();
     app.Build();
 

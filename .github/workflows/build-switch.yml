@@ -4,19 +4,32 @@
 # firmware or Atmosphère release usually needs only a rebuild here.
 #
 # Run it from the Actions tab (or `gh workflow run build-switch.yml`):
-#   version     -> must match the version strings in the sources (e.g. 0.7.22-duo2)
+#   version     -> must match the version strings in the sources (e.g. 0.7.22-duo3)
 #   atmosphere  -> Atmosphère tag to build against (e.g. 1.12.2)
-#   libnx       -> libnx commit; pinned to the one the last good build used, so
-#                  a rebuild gives the same result (BUILDINFO records it)
+#   libnx       -> libnx commit,
+#   libtesla    -> libtesla commit (overlay) and
+#   devkita64   -> devkitpro/devkita64 image digest: pinned to the ones the
+#                  last good build used, so a rebuild uses the same code and
+#                  tools (BUILDINFO records them)
 #   release     -> also publish a GitHub release with the zip (GPL-2.0: the
 #                  matching source is this commit of this public repository)
+#   prerelease  -> publish it as a prerelease (the default) until NX Paradox
+#                  pins it; the Switch app's updater offers prereleases only
+#                  with «Include betas»
+#
+# BUILDINFO and the release text also give the firmware the zip works on:
+# min_firmware from the window the sysmodule streams on
+# (tier4/applet-mitm/source/nxduo_live_window.h), max_firmware from the tag's
+# ATMOSPHERE_SUPPORTED_HOS_VERSION_MAJOR/MINOR, as M.m.x (Atmosphère's
+# firmware gate lets any micro version through).
 name: NX Duo Tap · Switch build
+run-name: "Switch build ${{ inputs.version }} · Atmosphère ${{ inputs.atmosphere }}"
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Versión del zip (debe coincidir con las cadenas del código), p. ej. 0.7.22-duo2"
+        description: "Versión del zip (debe coincidir con las cadenas del código), p. ej. 0.7.22-duo3"
         required: true
       atmosphere:
         description: "Tag de Atmosphère contra el que se compila, p. ej. 1.12.2"
@@ -26,10 +39,22 @@ on:
         description: "Commit de libnx (fijo al de la última compilación buena; un Atmosphère nuevo puede pedir uno más reciente, p. ej. master)"
         required: true
         default: "b156b4774fb2df7b93402169509266da7547fc4c"
+      libtesla:
+        description: "Commit de libtesla para el overlay (fijo al de la última compilación buena)"
+        required: true
+        default: "f766e9b607a05e9756843cbd62b3bfb98be1646c"
+      devkita64:
+        description: "Digest de la imagen devkitpro/devkita64, sha256:… (fijo al de la última compilación buena; un Atmosphère nuevo puede pedir una imagen más reciente)"
+        required: true
+        default: "sha256:1fc388c3a0d34bd2045a6dadcb1020e069d5f876a187fd705de14b4440c00282"
       release:
         description: "Publicar una release con el zip"
         type: boolean
         default: false
+      prerelease:
+        description: "Publicarla como prerelease (así queda hasta que NX Paradox la fije)"
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -39,24 +64,103 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
+      # No step pushes with git: the checkout keeps no token in .git/config,
+      # which tools/make_release.sh mounts into the build containers.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Atmosphère ${{ inputs.atmosphere }}
         run: git clone --depth 1 --branch "${{ inputs.atmosphere }}" https://github.com/Atmosphere-NX/Atmosphere "ref/Atmosphere-${{ inputs.atmosphere }}"
 
-      - name: libtesla (overlay)
-        run: git clone --depth 1 https://github.com/WerWolv/libtesla ref/libtesla
+      # The firmware the zip works on, for BUILDINFO and the release text: from
+      # NXDUO_LIVE_MAJOR_MIN.0.0 (the window the sysmodule streams on) to this
+      # Atmosphère's newest major.minor, any micro. tools/check_live_window.sh
+      # stops the run here, before the long build, when that window ends below
+      # Atmosphère's newest major (make_release.sh checks it again).
+      - name: Firmware range
+        id: fw
+        env:
+          AMS: ref/Atmosphere-${{ inputs.atmosphere }}
+        run: |
+          bash tools/check_live_window.sh "$AMS"
+          # the number in "#define NAME <number>" (LF or CRLF), read as check_live_window.sh does
+          num() { [ -f "$2" ] && tr -d '\r' < "$2" | sed -nE "s/^#define[[:space:]]+$1[[:space:]]+([0-9]+)([[:space:]].*)?\$/\1/p" | head -1; return 0; }
+          api="$AMS/libraries/libvapours/include/vapours/ams/ams_api_version.h"
+          min="$(num NXDUO_LIVE_MAJOR_MIN tier4/applet-mitm/source/nxduo_live_window.h)"
+          major="$(num ATMOSPHERE_SUPPORTED_HOS_VERSION_MAJOR "$api")"
+          minor="$(num ATMOSPHERE_SUPPORTED_HOS_VERSION_MINOR "$api")"
+          if [ -z "$min" ] || [ -z "$major" ] || [ -z "$minor" ]; then
+            echo "the firmware range is unreadable: NXDUO_LIVE_MAJOR_MIN '$min', ATMOSPHERE_SUPPORTED_HOS_VERSION_MAJOR '$major', ATMOSPHERE_SUPPORTED_HOS_VERSION_MINOR '$minor'"
+            exit 1
+          fi
+          echo "min=$min.0.0" >> "$GITHUB_OUTPUT"
+          echo "max=$major.$minor.x" >> "$GITHUB_OUTPUT"
+          echo "works on firmware $min.0.0 to $major.$minor.x"
+
+      - name: libtesla ${{ inputs.libtesla }} (overlay)
+        env:
+          LIBTESLA: ${{ inputs.libtesla }}
+        run: |
+          if [[ ! "$LIBTESLA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "libtesla must be a full commit, 40 hex digits (got '$LIBTESLA')"
+            exit 1
+          fi
+          git clone https://github.com/WerWolv/libtesla ref/libtesla
+          git -C ref/libtesla checkout "$LIBTESLA"
+          git -C ref/libtesla log -1 --format='libtesla %H %cd %s'
+
+      # Seconds, before the long build: the version strings and the firmware
+      # window (tools/make_release.sh checks them again), and the PC tests of
+      # the refusal line the Switch app and the overlay read and of the
+      # updaters' version order (tools/run_pc_tests.sh runs them too).
+      - name: Version strings and PC tests
+        env:
+          VERSION: ${{ inputs.version }}
+          AMS_TREE: ref/Atmosphere-${{ inputs.atmosphere }}
+        run: |
+          CHECK_ONLY=1 bash tools/make_release.sh "$VERSION"
+          gcc -std=c99 -Wall -Wextra common/test/refusal_test.c -o "$RUNNER_TEMP/refusal_test"
+          "$RUNNER_TEMP/refusal_test" "$RUNNER_TEMP"
+          gcc -std=c99 -Wall common/test/version_test.c -o "$RUNNER_TEMP/version_test"
+          "$RUNNER_TEMP/version_test"
+
+      # Every piece builds in the devkitpro/devkita64 image pinned by digest.
+      # tools/make_release.sh runs devkitpro/devkita64:latest for the launcher,
+      # overlay and manager: the pinned image takes that name here, so docker
+      # run finds it and pulls nothing newer.
+      - name: devkitpro/devkita64 ${{ inputs.devkita64 }}
+        id: dkp
+        env:
+          DEVKITA64: ${{ inputs.devkita64 }}
+        run: |
+          # a BUILDINFO line's value (devkitpro/devkita64@sha256:...) works too
+          digest="${DEVKITA64#devkitpro/devkita64@}"
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "devkita64 must be an image digest, sha256: and 64 hex digits (got '$DEVKITA64')"
+            exit 1
+          fi
+          docker pull "devkitpro/devkita64@$digest"
+          docker tag "devkitpro/devkita64@$digest" devkitpro/devkita64:latest
+          echo "image=devkitpro/devkita64@$digest" >> "$GITHUB_OUTPUT"
 
       # A new Atmosphère's libstratosphere can call libnx APIs newer than the
       # devkitPro image ships (1.12.2 needs fsStorageForBatchRead*): build that
       # libnx from source into a derived image for the sysmodule only.
       - name: libnx ${{ inputs.libnx }} image
+        env:
+          LIBNX: ${{ inputs.libnx }}
         run: |
+          # a commit, or a branch name such as master
+          if [[ ! "$LIBNX" =~ ^[0-9A-Za-z][0-9A-Za-z._/-]{0,99}$ ]]; then
+            echo "libnx must be a commit or a branch name (got '$LIBNX')"
+            exit 1
+          fi
           git clone https://github.com/switchbrew/libnx ref/libnx
-          git -C ref/libnx checkout "${{ inputs.libnx }}"
+          git -C ref/libnx checkout "$LIBNX"
           git -C ref/libnx log -1 --format='libnx %H %cd %s'
           cat > ref/Dockerfile.libnx <<'DOCKER'
-          FROM devkitpro/devkita64:latest
+          FROM ${{ steps.dkp.outputs.image }}
           COPY libnx /tmp/libnx
           RUN bash -lc 'cd /tmp/libnx && make -j4 && make install' && rm -rf /tmp/libnx
           DOCKER
@@ -79,14 +183,27 @@ jobs:
         run: bash tools/make_release.sh "${{ inputs.version }}"
 
       - name: SHA-256, BUILDINFO and debug symbols
+        env:
+          MIN_FIRMWARE: ${{ steps.fw.outputs.min }}
+          MAX_FIRMWARE: ${{ steps.fw.outputs.max }}
+          PINNED: ${{ steps.dkp.outputs.image }}
         run: |
+          # the launcher, overlay and manager were built in devkitpro/devkita64:latest
+          # (tools/make_release.sh): it must still be the pinned image
+          got="$(docker image inspect devkitpro/devkita64:latest --format '{{join .RepoDigests " "}}' || true)"
+          case " $got " in
+            *" $PINNED "*) ;;
+            *) echo "devkitpro/devkita64:latest is '$got', not the pinned $PINNED"; exit 1 ;;
+          esac
           {
             echo "NX Duo Tap ${{ inputs.version }}"
             echo "source       ${{ github.repository }}@${{ github.sha }}"
             echo "atmosphere   ${{ inputs.atmosphere }} $(git -C "ref/Atmosphere-${{ inputs.atmosphere }}" rev-parse HEAD)"
+            echo "min_firmware $MIN_FIRMWARE"
+            echo "max_firmware $MAX_FIRMWARE"
             echo "libnx        $(git -C ref/libnx rev-parse HEAD)"
             echo "libtesla     $(git -C ref/libtesla rev-parse HEAD)"
-            echo "devkita64    $(docker image inspect devkitpro/devkita64:latest --format '{{index .RepoDigests 0}}' 2>/dev/null || echo unknown)"
+            echo "devkita64    $PINNED"
             echo "built        $(date -u +%Y-%m-%dT%H:%M:%SZ) run ${{ github.run_id }}"
           } | tee dist/BUILDINFO
           cd dist
@@ -110,9 +227,19 @@ jobs:
         if: ${{ inputs.release }}
         env:
           GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          MIN_FIRMWARE: ${{ steps.fw.outputs.min }}
+          MAX_FIRMWARE: ${{ steps.fw.outputs.max }}
         run: |
+          pre=()
+          if [ "$PRERELEASE" = "true" ]; then pre=(--prerelease); fi
+          # the ELFs too: the run's artifact expires, and a crash report maps
+          # back to a source line only with the exact build's ELF
+          shopt -s nullglob
+          elfs=(dist/*.elf)
           gh release create "v${{ inputs.version }}" \
-            "dist/nx-duo-tap-${{ inputs.version }}-switch.zip" dist/SHA256SUMS dist/BUILDINFO \
+            "dist/nx-duo-tap-${{ inputs.version }}-switch.zip" dist/SHA256SUMS dist/BUILDINFO "${elfs[@]}" \
             --target "${{ github.sha }}" \
+            "${pre[@]}" \
             --title "v${{ inputs.version }} (Atmosphère ${{ inputs.atmosphere }})" \
-            --notes "NX Duo Tap ${{ inputs.version }}, compilado contra Atmosphère ${{ inputs.atmosphere }} por TestPilotX para NX Duo. Código fuente: este commit de este repositorio (GPL-2.0). Proyecto original: https://github.com/TomasUribe/switch-frame-tap"
+            --notes "NX Duo Tap ${{ inputs.version }}, compilado contra Atmosphère ${{ inputs.atmosphere }} por TestPilotX para NX Duo. Funciona con el firmware $MIN_FIRMWARE al $MAX_FIRMWARE. Código fuente: este commit de este repositorio (GPL-2.0). Proyecto original: https://github.com/TomasUribe/switch-frame-tap"

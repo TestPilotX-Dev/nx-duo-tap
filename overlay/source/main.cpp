@@ -26,6 +26,7 @@
 #include <cstring>
 #include "../../common/sound_patch.hpp"
 #include "../../common/config_ini.hpp"
+#include "../../common/nxduo_refusal.h"   /* NX Paradox: the sysmodule's firmware refusal, in its log */
 
 namespace {
 
@@ -226,9 +227,42 @@ namespace {
 
     /* ---- the GUI -------------------------------------------------------- */
 
+    /* the version the frame shows; without its "v", the one the sysmodule ends
+     * its firmware refusal line with (NX Paradox, common/nxduo_refusal.h) */
+    constexpr const char *Version = "v0.7.22-duo3";
+
+    /* NX Paradox: the sysmodule did not start, the firmware being newer than its
+     * build knows (this version's line in its log): say so, in Spanish when the
+     * console is. The log is read on the first look, then every tenth (~5 s:
+     * the module may still start this boot), and only while the module has no
+     * process: from its start until it registers sftap it rewrites the log. The
+     * line counts only for the firmware running now - until the module starts
+     * this boot, the log is an earlier boot's. Once found it stays until the
+     * module answers (Refresh). */
+    constexpr u64 ModuleTid = 0x0100000000000C20ull;
+    std::string g_refused;
+    u32 g_refused_looks = 0;
+
+    std::string NotRunningText() {
+        u64 pid = 0;
+        if (g_refused.empty() && g_refused_looks++ % 10 == 0 && R_FAILED(pmdmntGetProcessId(&pid, ModuleTid))) {
+            unsigned fw[3] = {};
+            int refused = 0, es = 0;
+            const u32 hv = hosversionGet();
+            tsl::hlp::doWithSDCardHandle([&] { refused = nxduo_refusal_find(Version + 1, fw); });
+            if (refused && fw[0] == HOSVER_MAJOR(hv) && fw[1] == HOSVER_MINOR(hv) && fw[2] == HOSVER_MICRO(hv)) {
+                tsl::hlp::doWithSmSession([&] { es = nxduo_system_spanish(); });
+                char b[96];
+                std::snprintf(b, sizeof(b), es ? "No compatible con el firmware %u.%u.%u todavía" : "Not compatible with firmware %u.%u.%u yet", fw[0], fw[1], fw[2]);
+                g_refused = b;
+            }
+        }
+        return g_refused.empty() ? std::string("Sysmodule not running") : g_refused;
+    }
+
     std::string StatusText(bool have, const StreamStatus &st) {
         char b[96];
-        if (!have) { return "Sysmodule not running"; }
+        if (!have) { return NotRunningText(); }
         switch (st.state) {
             case LiveState_Starting:   return "Starting (waits for a game)";
             case LiveState_Off:        return "Off";
@@ -248,7 +282,7 @@ namespace {
     class MainGui : public tsl::Gui {
         public:
             tsl::elm::Element *createUI() override {
-                auto *frame = new tsl::elm::OverlayFrame("NX Duo Tap", "v0.7.22-duo2");
+                auto *frame = new tsl::elm::OverlayFrame("NX Duo Tap", Version);
                 auto *list = new tsl::elm::List();
 
                 list->addItem(new tsl::elm::CategoryHeader("Stream to PC"));
@@ -283,7 +317,12 @@ namespace {
                     list->addItem(scr);
                 }
                 list->addItem(new tsl::elm::CustomDrawer([this](tsl::gfx::Renderer *r, s32 x, s32 y, s32 w, s32 h) {
-                    r->drawString(m_status.c_str(), false, x + 15, y + 22, 18, r->a(tsl::style::color::ColorText));
+                    /* NX Paradox: the firmware notice, too long for the line (Spanish), on two lines rather
+                     * than cut off - "X.Y.Z todavía" where the game's fps go, none without the module */
+                    const size_t cut = m_refused && r->drawString(m_status.c_str(), false, 0, 0, 18, tsl::style::color::ColorTransparent).first > static_cast<u32>(w - 30)
+                                     ? m_status.rfind(' ', m_status.find_first_of("0123456789")) : std::string::npos;
+                    r->drawString(m_status.substr(0, cut).c_str(), false, x + 15, y + 22, 18, r->a(tsl::style::color::ColorText));
+                    if (cut != std::string::npos) { r->drawString(m_status.c_str() + cut + 1, false, x + 15, y + 46, 18, r->a(tsl::style::color::ColorText)); }
                     r->drawString(m_game.c_str(), false, x + 15, y + 46, 16, r->a(tsl::style::color::ColorDescription));
                 }), 60);
 
@@ -377,7 +416,10 @@ namespace {
         private:
             void Refresh() {
                 m_have = SftapStatus(&m_st);
+                /* NX Paradox: the module answers - a firmware notice from before no longer holds */
+                if (m_have) { g_refused.clear(); g_refused_looks = 0; }
                 m_status = StatusText(m_have, m_st);
+                m_refused = !m_have && !g_refused.empty();
                 if (m_have && m_st.state == LiveState_Streaming && m_st.game_fps_x10 != 0) {
                     char b[64];
                     std::snprintf(b, sizeof(b), "game %u.%u fps", m_st.game_fps_x10 / 10, m_st.game_fps_x10 % 10);
@@ -402,6 +444,7 @@ namespace {
 
             StreamStatus m_st = {};
             bool m_have = false;
+            bool m_refused = false;   /* NX Paradox: the status is the firmware notice */
             u32 m_tick = 0;
             std::string m_status, m_game;
             tsl::elm::ToggleListItem *m_toggle = nullptr;

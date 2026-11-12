@@ -30,6 +30,8 @@ run "keyframe spacing over USB / network (usb_keyframe_interval)" \
     bash -c "g++ -std=c++20 -Wall -Wextra -Werror -Itier4/applet-mitm/source tier4/applet-mitm/test/gop_test.cpp -o $tmp/gop_test && $tmp/gop_test"
 run "version order for the updaters (common/sft_version.h)" \
     bash -c "gcc -std=c99 -Wall common/test/version_test.c -o $tmp/version_test && $tmp/version_test"
+run "firmware refusal line, as the Switch app and the overlay read it (common/nxduo_refusal.h)" \
+    bash -c "gcc -std=c99 -Wall -Wextra common/test/refusal_test.c -o $tmp/refusal_test && $tmp/refusal_test $tmp"
 run "viewer messages: old words, controller state, TCP split anywhere (v0.7.20)" \
     bash -c "g++ -std=c++20 -Wall -Itier4/applet-mitm/source tier4/applet-mitm/test/viewermsg_test.cpp -o $tmp/viewermsg_test && $tmp/viewermsg_test"
 run "early encode collection: pending, ready, once only, cancelled (PR #12)" \

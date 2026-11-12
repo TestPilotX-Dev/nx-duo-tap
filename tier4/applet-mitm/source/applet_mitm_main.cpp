@@ -37,6 +37,7 @@
 #include "applet_mitm_overlay.hpp"
 #include "applet_mitm_featmem.hpp"
 #include "applet_mitm_vpad.hpp"
+#include "nxduo_live_window.h"
 
 /* Force libnx's nv layer to use "nvdrv:s" instead of picking a service via
  * appletGetAppletType() - that call is meaningless here and is what made a
@@ -1155,11 +1156,17 @@ namespace ams {
         if (::ams::hos::Tier4IsUntestedFirmware()) {
             const u32 hv = hosversionGet();
             const bool anyway = ArmFileContains("anyfw");
-            mitm::applet::LogLine("firmware %u.%u.%u is newer than this build knows (built against Atmosphere %d.%d.%d) - %s",
+            /* NX Paradox: the Switch app and the overlay read this line at the
+             * start of the log (NX Paradox reads it from the microSD); the
+             * version goes last, after the part they parse */
+            mitm::applet::LogLine("firmware %u.%u.%u is newer than this build knows (built against Atmosphere %d.%d.%d) - %s (NX Duo Tap 0.7.22-duo3)",
                                   HOSVER_MAJOR(hv), HOSVER_MINOR(hv), HOSVER_MICRO(hv),
                                   ATMOSPHERE_RELEASE_VERSION_MAJOR, ATMOSPHERE_RELEASE_VERSION_MINOR, ATMOSPHERE_RELEASE_VERSION_MICRO,
                                   anyway ? "starting anyway (allow_untested_firmware = 1)" : "not starting. allow_untested_firmware = 1 in config.ini overrides");
-            if (!anyway) { return; }
+            if (!anyway) {
+                mitm::applet::LogMark("main:refused_firmware");   /* last.txt says why it stopped */
+                return;
+            }
         }
         LogAppletLimits("main start");
 
@@ -1173,13 +1180,14 @@ namespace ams {
         /* M76: this line used to print jpg=off before jpg was parsed, and
          * called every build a "read-only observer". The flag dump below is
          * the record of what this boot armed. */
-        mitm::applet::LogLine("applet-mitm v0.7.22-duo2: up (grc IPC interceptor %s), built against Atmosphere %d.%d.%d",
+        mitm::applet::LogLine("applet-mitm v0.7.22-duo3: up (grc IPC interceptor %s), built against Atmosphere %d.%d.%d",
                               mitm::applet::g_grc_armed ? "ARMED" : "off",
                               ATMOSPHERE_RELEASE_VERSION_MAJOR, ATMOSPHERE_RELEASE_VERSION_MINOR, ATMOSPHERE_RELEASE_VERSION_MICRO);
         {
             const auto api = exosphere::GetApiInfo();
             const u32 hv = hosversionGet();
-            mitm::applet::LogLine("Atmosphere %u.%u.%u, firmware %u.%u.%u (built with Atmosphere %u.%u.%u, tested on firmware 22.5.0; 23.0.0 by a user)",
+            /* NX Paradox: the window is nxduo_live_window.h; NX Duo Tap was tested on 23.5.0 */
+            mitm::applet::LogLine("Atmosphere %u.%u.%u, firmware %u.%u.%u (built with Atmosphere %u.%u.%u, streams on firmware " NXDUO_LIVE_TEXT ", tested on 23.5.0)",
                                   api.GetMajorVersion(), api.GetMinorVersion(), api.GetMicroVersion(),
                                   HOSVER_MAJOR(hv), HOSVER_MINOR(hv), HOSVER_MICRO(hv),
                                   ATMOSPHERE_RELEASE_VERSION_MAJOR, ATMOSPHERE_RELEASE_VERSION_MINOR, ATMOSPHERE_RELEASE_VERSION_MICRO);

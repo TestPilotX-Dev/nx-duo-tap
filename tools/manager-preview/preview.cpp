@@ -103,5 +103,22 @@ int main(int argc, char **argv) {
     DrawProgressCard("Get extras", "ReverseNX-RT", "Downloading...", 0.42, "From the official GitHub release");
     DrawHints({ { "", 'B', "Cancel" } }, 0);
     Save(surf, out, "12-install");
+
+    /* NX Paradox: the sysmodule did not start on a firmware newer than its
+     * build knows - its log's line, as applet_mitm_main.cpp writes it */
+    if (FILE *f = std::fopen("sdmc:/config/switch-frame-tap/log.txt", "wb")) {
+        std::fprintf(f, "[    21.408] firmware 24.0.0 is newer than this build knows (built against Atmosphere 1.12.2) - not starting. "
+                        "allow_untested_firmware = 1 in config.ini overrides (NX Duo Tap %s)\n", AppVersion);
+        std::fclose(f);
+    }
+    preview::g_module_running = false;
+    preview::g_fw = MAKEHOSVERSION(24, 0, 0);
+    app.fw = hosversionGet();
+    app.toast_frames = 0;
+    app.es = true;
+    app.Refresh();
+    Shot(app, surf, out, "13-home-firmware-es", 0, false);
+    app.es = false;
+    Shot(app, surf, out, "13b-home-firmware-en", 0, false);
     return 0;
 }

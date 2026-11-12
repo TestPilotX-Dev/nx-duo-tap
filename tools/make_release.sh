@@ -3,6 +3,9 @@
 #
 #   bash tools/make_release.sh 0.1.0      -> dist/nx-duo-tap-0.1.0-switch.zip
 #
+# CHECK_ONLY=1 stops after the checks that come before the build (NX Paradox:
+# the workflow runs them first, so a mistyped version stops it in seconds).
+#
 # The zip unpacks onto the root of the SD card. It carries no config.ini, so
 # an update never overwrites the user's settings (the sysmodule's defaults
 # are the manager's defaults), and no test arm file.
@@ -20,9 +23,10 @@ if [ -z "$ALLOW_PROBES" ] && grep -qE '^#define SFT_[A-Z_]*PROBE 1' "$REPO"/tier
     echo "a research probe is on (#define SFT_..._PROBE 1) - turn it off, or ALLOW_PROBES=1 for a test build"; exit 1
 fi
 
-# v0.7.14: the version is typed in five places, and a release once shipped
-# with the nacp versions two releases behind (8903086) - they must all say VER
-# (the .nacp ones without a -beta/-test suffix)
+# v0.7.14: the version is typed in six places (NX Paradox: the sixth is the end
+# of the refusal line), and a release once shipped with the nacp versions two
+# releases behind (8903086) - they must all say VER (the .nacp ones without a
+# -beta/-test suffix)
 base="${VER%%-*}"
 bad=0
 need() { grep -qE -- "$2" "$REPO/$1" || { echo "  $1 does not say $3"; bad=1; }; }
@@ -31,7 +35,15 @@ need overlay/Makefile          "^APP_VERSION[[:space:]]*:=[[:space:]]*${base//./
 need manager/source/main.cpp   "AppVersion[[:space:]]*=[[:space:]]*\"${VER//./\\.}\""   "AppVersion = \"$VER\""
 need overlay/source/main.cpp   "\"v${VER//./\\.}\""                                     "\"v$VER\""
 need tier4/applet-mitm/source/applet_mitm_main.cpp "applet-mitm v${VER//./\\.}: up"     "applet-mitm v$VER: up"
+# NX Paradox: and the end of the line it logs when it does not start on a newer firmware
+need tier4/applet-mitm/source/applet_mitm_main.cpp "\(NX Duo Tap ${VER//./\\.}\)\""     "(NX Duo Tap $VER)"
 [ $bad -eq 0 ] || { echo "the version strings do not all say $VER - fix them first"; exit 1; }
+
+# NX Paradox: the firmware window the sysmodule streams on must reach the
+# newest firmware major of the Atmosphere it is built against (the tree
+# tier4/applet-mitm/build.sh picks)
+bash "$REPO/tools/check_live_window.sh" "${AMS_TREE:-$REPO/ref/Atmosphere}"
+[ -z "$CHECK_ONLY" ] || { echo "the checks before the build passed (CHECK_ONLY: nothing built)"; exit 0; }
 
 echo "== sysmodule"
 MAKEFLAGS="${MAKEFLAGS:--j6}" bash "$REPO/tier4/applet-mitm/build.sh" >/dev/null
